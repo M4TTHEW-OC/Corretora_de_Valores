@@ -3,9 +3,11 @@
 #include <string.h>
 #include <stdbool.h>
 #include <locale.h>
-#include <errno.h>
+#include <time.h>
 
 // ===== Estruturas =====
+#define MAX_TRANSACOES 100
+
 typedef struct {
     float saldo;
 } ContaBanco;
@@ -15,11 +17,20 @@ typedef struct {
 } ContaInvestimento;
 
 typedef struct {
+    char descricao[100];
+    float valor;
+    char tipo[20]; // PIX, TED, Transferência, Resgate
+    char data[30];
+} Transacao;
+
+typedef struct {
     char nome[50];
     char cpf[15];
     char senha[20];
     ContaBanco banco;
     ContaInvestimento investimento;
+    Transacao historico[MAX_TRANSACOES];
+    int qtdTransacoes;
 } Usuario;
 
 // ===== Protótipos =====
@@ -31,13 +42,21 @@ void menuContaInvestimento(Usuario *u);
 void depositarBanco(Usuario *u);
 void transferirParaInvestimento(Usuario *u);
 void transferirParaBanco(Usuario *u);
+void transferirParaBancoExterno(Usuario *u);
+void registrarTransacao(Usuario *u, const char *descricao, float valor, const char *tipo);
+void exibirExtrato(Usuario *u);
 
 // ===== Funções =====
+void clear_input(void){
+    int c;
+    while((c = getchar()) != '\n' && c != EOF);
+}
 
 // Cadastro de usuário
 void cadastrarUsuario(Usuario *u) {
     printf("\n=== Cadastro de Usuário ===\n");
     printf("Nome: ");
+    clear_input();
     scanf(" %[^\n]", u->nome);
     printf("CPF: ");
     scanf("%s", u->cpf);
@@ -47,6 +66,7 @@ void cadastrarUsuario(Usuario *u) {
     // Inicializa contas
     u->banco.saldo = 0;
     u->investimento.saldo = 0;
+    u->qtdTransacoes = 0;
 
     printf("Usuário %s cadastrado com sucesso!\n", u->nome);
 }
@@ -69,6 +89,32 @@ bool validarLogin(Usuario *u) {
     }
 }
 
+// Registrar transação
+void registrarTransacao(Usuario *u, const char *descricao, float valor, const char *tipo) {
+    if (u->qtdTransacoes < MAX_TRANSACOES) {
+        Transacao *t = &u->historico[u->qtdTransacoes++];
+        strncpy(t->descricao, descricao, sizeof(t->descricao)-1);
+        t->valor = valor;
+        strncpy(t->tipo, tipo, sizeof(t->tipo)-1);
+        time_t agora = time(NULL);
+        struct tm *tm_info = localtime(&agora);
+        strftime(t->data, sizeof(t->data), "%d/%m/%Y %H:%M", tm_info);
+    }
+}
+
+// Exibir extrato
+void exibirExtrato(Usuario *u) {
+    printf("\n===== EXTRATO DE %s =====\n", u->nome);
+    for(int i=0; i<u->qtdTransacoes; i++){
+        printf("[%s] %-15s | %-30s | R$ %.2f\n",
+               u->historico[i].data,
+               u->historico[i].tipo,
+               u->historico[i].descricao,
+               u->historico[i].valor);
+    }
+    printf("Saldo Banco: R$ %.2f | Saldo Investimento: R$ %.2f\n", u->banco.saldo, u->investimento.saldo);
+}
+
 // Menu da Conta do Banco
 void menuContaBanco(Usuario *u) {
     int opcao;
@@ -77,23 +123,23 @@ void menuContaBanco(Usuario *u) {
         printf("Olá %s, saldo atual: R$ %.2f\n", u->nome, u->banco.saldo);
         printf("1 - Depositar (PIX/TED)\n");
         printf("2 - Transferir para Investimentos\n");
-        printf("3 - Voltar\n");
+        printf("3 - Transferir para outro Banco\n");
+        printf("4 - Extrato\n");
+        printf("5 - Voltar\n");
         printf("Escolha: ");
         scanf("%d", &opcao);
 
         switch (opcao)
         {
-        case 1: depositarBanco(u); break;
-
-        case 2: transferirParaInvestimento(u); break;
-
-        case 3: printf("Voltando...\n"); break;
-       
-        default: printf("Opção inválida.\n");     
-            
+            case 1: depositarBanco(u); break;
+            case 2: transferirParaInvestimento(u); break;
+            case 3: transferirParaBancoExterno(u); break;
+            case 4: exibirExtrato(u); break;
+            case 5: printf("Voltando...\n"); break;
+            default: printf("Opção inválida.\n");
         }
 
-    } while(opcao != 3);
+    } while(opcao != 5);
 }
 
 // Menu da Conta de Investimentos
@@ -102,21 +148,21 @@ void menuContaInvestimento(Usuario *u) {
     do {
         printf("\n=== CONTA DE INVESTIMENTOS ===\n");
         printf("Olá %s, saldo atual: R$ %.2f\n", u->nome, u->investimento.saldo);
-         printf("1 - Resgatar para Banco\n\n");
-        printf("2 - Voltar\n");
+        printf("1 - Resgatar para Banco\n");
+        printf("2 - Extrato\n");
+        printf("3 - Voltar\n");
         printf("Escolha: ");
         scanf("%d", &opcao);
 
         switch (opcao)
         {
-        case 1: transferirParaBanco(u);   break;
-        
-        case 2: printf("Voltando...\n"); break;
-
-        default: printf("Opção inválida.\n"); break;
+            case 1: transferirParaBanco(u); break;
+            case 2: exibirExtrato(u); break;
+            case 3: printf("Voltando...\n"); break;
+            default: printf("Opção inválida.\n"); break;
         }
 
-    } while(opcao != 2);
+    } while(opcao != 3);
 }
 
 // Menu Principal
@@ -126,22 +172,17 @@ void menuPrincipal(Usuario *u) {
         printf("\n=== MENU PRINCIPAL ===\n");
         printf("1 - Conta do Banco\n");
         printf("2 - Conta de Investimentos\n");
+        printf("3 - Extrato Completo\n");
         printf("0 - Sair\n");
         printf("Escolha: ");
         scanf("%d", &opcao);
 
         switch(opcao) {
-            case 1:
-                menuContaBanco(u);
-                break;
-            case 2:
-                menuContaInvestimento(u);
-                break;
-            case 0:
-                printf("Saindo do sistema...\n");
-                break;
-            default:
-                printf("Opção inválida!\n");
+            case 1: menuContaBanco(u); break;
+            case 2: menuContaInvestimento(u); break;
+            case 3: exibirExtrato(u); break;
+            case 0: printf("Saindo do sistema...\n"); break;
+            default: printf("Opção inválida!\n");
         }
     } while(opcao != 0);
 }
@@ -166,11 +207,17 @@ void depositarBanco(Usuario *u) {
 
     u->banco.saldo += (valor - taxa);
 
+    // Registrar no extrato
+    if(tipo == 1)
+        registrarTransacao(u, "Depósito PIX", valor, "PIX");
+    else
+        registrarTransacao(u, "Depósito TED", valor, "TED");
+
     printf("Depósito realizado com sucesso!\n");
     printf("Olá %s, saldo atual do banco: R$ %.2f\n", u->nome, u->banco.saldo);
 }
 
-// Função para transferir do banco → investimentos
+// Transferências
 void transferirParaInvestimento(Usuario *u) {
     float valor;
     printf("\n=== Transferência Banco -> Investimentos ===\n");
@@ -181,6 +228,7 @@ void transferirParaInvestimento(Usuario *u) {
     if (valor > 0 && valor <= u->banco.saldo) {
         u->banco.saldo -= valor;
         u->investimento.saldo += valor;
+        registrarTransacao(u, "Transferência p/ Investimento", valor, "Transferência");
         printf("Transferência realizada com sucesso!\n");
         printf("Saldo banco: R$ %.2f | Saldo investimentos: R$ %.2f\n",
                u->banco.saldo, u->investimento.saldo);
@@ -189,7 +237,6 @@ void transferirParaInvestimento(Usuario *u) {
     }
 }
 
-// Função para transferir do investimento → banco
 void transferirParaBanco(Usuario *u) {
     float valor;
     printf("\n=== Resgate Investimentos -> Banco ===\n");
@@ -200,6 +247,7 @@ void transferirParaBanco(Usuario *u) {
     if (valor > 0 && valor <= u->investimento.saldo) {
         u->investimento.saldo -= valor;
         u->banco.saldo += valor;
+        registrarTransacao(u, "Resgate Investimento p/ Banco", valor, "Resgate");
         printf("Resgate realizado com sucesso!\n");
         printf("Saldo banco: R$ %.2f | Saldo investimentos: R$ %.2f\n",
                u->banco.saldo, u->investimento.saldo);
@@ -208,15 +256,30 @@ void transferirParaBanco(Usuario *u) {
     }
 }
 
+void transferirParaBancoExterno(Usuario *u) {
+    float valor;
+    printf("\n=== Transferência Banco -> Externo ===\n");
+    printf("Saldo disponível no banco: R$ %.2f\n", u->banco.saldo);
+    printf("Digite o valor para transferir: R$ ");
+    scanf("%f", &valor);
+
+    if (valor > 0 && valor <= u->banco.saldo) {
+        u->banco.saldo -= valor;
+        registrarTransacao(u, "Transferência Banco Externo", valor, "TED");
+        printf("Transferência para banco externo concluída!\n");
+        printf("Saldo atual no banco: R$ %.2f\n", u->banco.saldo);
+    } else {
+        printf("Saldo insuficiente ou valor inválido.\n");
+    }
+}
 
 // ===== Função principal =====
 int main(void) {
-    setlocale(LC_ALL, "Portuguese"); // permite acentuação no terminal
+    setlocale(LC_ALL, "Portuguese");
     Usuario usuario;
     int logado = 0;
     int opcao;
 
-    // Loop de login/cadastro
     while (!logado) {
         printf("\n=== Sistema Corretora ===\n");
         printf("1 - Cadastrar Usuário\n");
@@ -233,11 +296,10 @@ int main(void) {
             printf("Saindo do sistema...\n");
             return 0;
         } else{
-            printf("Opção inválida.");
+            printf("Opção inválida.\n");
         }
     }
 
-    // Menu principal unificado
     menuPrincipal(&usuario);
 
     return 0;
