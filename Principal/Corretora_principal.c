@@ -589,7 +589,7 @@ int main(void) {
 
     int opc;
     do {
-        printf("\n=== Sistema Corretora (versão 515.1.4) ===\n");
+        printf("\n=== Sistema Corretora ===\n");
         printf("1 - Cadastrar Usuário\n");
         printf("2 - Login\n");
         printf("0 - Sair\n");
