@@ -1,4 +1,4 @@
-// main.c - Versão 515.1.4 + compra/venda/integrado
+// main.c - Versão 1.4 + compra/venda/integrado
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
