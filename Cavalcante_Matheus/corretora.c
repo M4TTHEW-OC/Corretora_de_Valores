@@ -1,4 +1,6 @@
-// main.c - Versão 515.1.4 + compra/venda/integrado
+// main.c - Versão 1.5 build 700
+// Consolidado: proventos -> ContaInvestimento, venda com ativo correto, acumula meses por ativo.
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,11 +19,11 @@
 
 /* Registro de transação para extrato */
 typedef struct {
-    char tipo[32];       // "PIX", "TED", "Transferência", "Compra", "Venda", "Resgate"
+    char tipo[32];       // "PIX", "TED", "Transferência", "Compra", "Venda", "Resgate", "Provento"
     char descricao[80];  // descrição curta
     float valor;         // valor (positivo = entrada, negativo = saída)
     float taxa;          // taxa aplicada (se houver)
-    float saldoFinalBanco; // saldo do banco após operação (para referência)
+    float saldoFinal;    // saldo após operação (pode ser do banco ou do caixa invest)
     char dataHora[20];   // "dd/mm HH:MM"
 } Transacao;
 
@@ -31,8 +33,9 @@ typedef struct {
     char nome[50];
     float preco;                 // preço unitário atual (fixo na simulação)
     float dividend_per_period;   // dividendo por cota por pagamento
-    int periods_per_year;        // quantas vezes paga por ano
+    int periods_per_year;        // quantas vezes paga por ano (1,2,4,12)
     bool isFII;                  // FII tem rendimento isento (sim)
+    int mesesAcumulados;         // acumula meses simulados
 } AtivoRV;
 
 /* Entrada de carteira (posse do usuário) */
@@ -40,6 +43,7 @@ typedef struct {
     char ticker[16];
     int quantidade;
     float precoMedio; // preço médio de compra
+    int mesesAcumuladosLocal; // opcional: se quiser contar por posição (não usado hoje)
 } AtivoCarteira;
 
 /* Conta de investimento: saldo em caixa + carteira + extrato próprio */
@@ -70,11 +74,11 @@ typedef struct {
 /* ======= Ativos pré-definidos ======= */
 /* Valores ilustrativos — ajuste se quiser */
 AtivoRV ativosDisponiveis[] = {
-    { "SANEPAR", "Sanepar",        20.00f, 1.50f, 1,  false },
-    { "CEMIG",   "Cemig",          10.00f, 0.60f, 2,  false },
-    { "BBAS3",   "Banco do Brasil",30.00f, 0.35f, 4,  false },
-    { "ITAU",    "Itaú",           25.00f, 0.05f,12,  false },
-    { "HGLG11",  "FII HGLG11",     80.00f, 0.60f,12,  true  }
+    { "SANEPAR", "Sanepar",        20.00f, 1.50f, 1,  false, 0 },
+    { "CEMIG",   "Cemig",          10.00f, 0.60f, 2,  false, 0 },
+    { "BBAS3",   "Banco do Brasil",30.00f, 0.35f, 4,  false, 0 },
+    { "ITAU",    "Itaú",           25.00f, 0.05f,12,  false, 0 },
+    { "HGLG11",  "FII HGLG11",     80.00f, 0.60f,12,  true,  0 }
 };
 const int NUM_ATIVOS = sizeof(ativosDisponiveis) / sizeof(AtivoRV);
 
@@ -112,6 +116,9 @@ void comprarAtivoRV(Usuario *u);
 void venderAtivoRV(Usuario *u);
 void mostrarCarteira(Usuario *u);
 
+/* simulação de proventos RV (acumula meses) */
+void simularProventosRV(Usuario *u);
+
 /* ======= Implementações utilitárias ======= */
 
 void clear_input(void) {
@@ -134,7 +141,7 @@ void timestamp_now(char *out, int size) {
 
 /* ======= Extrato / registro de transações ======= */
 
-/* registra em extrato do banco (usa saldo do banco como saldoFinalBanco) */
+/* registra em extrato do banco */
 void registrarTransacaoBanco(Usuario *u, const char *tipo, const char *desc, float valor, float taxa) {
     if (u->banco.numTransacoes >= MAX_TRANSACOES) return;
     Transacao *t = &u->banco.extrato[u->banco.numTransacoes++];
@@ -142,11 +149,11 @@ void registrarTransacaoBanco(Usuario *u, const char *tipo, const char *desc, flo
     strncpy(t->descricao, desc, sizeof(t->descricao)-1); t->descricao[sizeof(t->descricao)-1] = '\0';
     t->valor = valor;
     t->taxa = taxa;
-    t->saldoFinalBanco = u->banco.saldo;
+    t->saldoFinal = u->banco.saldo;
     timestamp_now(t->dataHora, sizeof(t->dataHora));
 }
 
-/* registra em extrato do investimento (usa saldo do investimento como referência) */
+/* registra em extrato do investimento */
 void registrarTransacaoInvest(Usuario *u, const char *tipo, const char *desc, float valor, float taxa) {
     if (u->investimento.numTransacoes >= MAX_TRANSACOES) return;
     Transacao *t = &u->investimento.extrato[u->investimento.numTransacoes++];
@@ -154,28 +161,34 @@ void registrarTransacaoInvest(Usuario *u, const char *tipo, const char *desc, fl
     strncpy(t->descricao, desc, sizeof(t->descricao)-1); t->descricao[sizeof(t->descricao)-1] = '\0';
     t->valor = valor;
     t->taxa = taxa;
-    t->saldoFinalBanco = u->investimento.saldo; // aqui usamos como "saldo pós-op" do caixa invest
+    t->saldoFinal = u->investimento.saldo;
     timestamp_now(t->dataHora, sizeof(t->dataHora));
 }
 
 void exibirExtratoBanco(Usuario *u) {
     printf("\n=== EXTRATO - CONTA BANCO ===\n");
-    if (u->banco.numTransacoes == 0) printf("Nenhuma transação no banco.\n");
-    for (int i = 0; i < u->banco.numTransacoes; ++i) {
-        Transacao *t = &u->banco.extrato[i];
-        printf("[%s] %-12s | %-30s | Valor: R$ %.2f | Taxa: R$ %.2f | Saldo pós-op: R$ %.2f\n",
-               t->dataHora, t->tipo, t->descricao, t->valor, t->taxa, t->saldoFinalBanco);
+    if (u->banco.numTransacoes == 0) {
+        printf("Nenhuma transação no banco.\n");
+    } else {
+        for (int i = 0; i < u->banco.numTransacoes; ++i) {
+            Transacao *t = &u->banco.extrato[i];
+            printf("[%s] %-12s | %-30s | Valor: R$ %8.2f | Taxa: R$ %7.2f | Saldo: R$ %8.2f\n",
+                   t->dataHora, t->tipo, t->descricao, t->valor, t->taxa, t->saldoFinal);
+        }
     }
     printf("Saldo Banco: R$ %.2f\n", u->banco.saldo);
 }
 
 void exibirExtratoInvest(Usuario *u) {
     printf("\n=== EXTRATO - CONTA INVESTIMENTO (CAIXA) ===\n");
-    if (u->investimento.numTransacoes == 0) printf("Nenhuma transação no investimento.\n");
-    for (int i = 0; i < u->investimento.numTransacoes; ++i) {
-        Transacao *t = &u->investimento.extrato[i];
-        printf("[%s] %-12s | %-30s | Valor: R$ %.2f | Taxa: R$ %.2f | Saldo pós-op (caixa): R$ %.2f\n",
-               t->dataHora, t->tipo, t->descricao, t->valor, t->taxa, t->saldoFinalBanco);
+    if (u->investimento.numTransacoes == 0) {
+        printf("Nenhuma transação no investimento.\n");
+    } else {
+        for (int i = 0; i < u->investimento.numTransacoes; ++i) {
+            Transacao *t = &u->investimento.extrato[i];
+            printf("[%s] %-12s | %-30s | Valor: R$ %8.2f | Taxa: R$ %7.2f | Saldo: R$ %8.2f\n",
+                   t->dataHora, t->tipo, t->descricao, t->valor, t->taxa, t->saldoFinal);
+        }
     }
     printf("Saldo caixa investimento: R$ %.2f\n", u->investimento.saldo);
 }
@@ -237,11 +250,11 @@ void depositarBanco(Usuario *u) {
         float taxa = valor * 0.01f;
         u->banco.saldo += (valor - taxa);
         char desc[80]; snprintf(desc, sizeof(desc), "Depósito TED R$ %.2f", valor);
-        registrarTransacaoBanco(u, "TED", desc, valor - taxa, taxa);
+        registrarTransacaoBanco(u, "Depósito", desc, valor - taxa, taxa);
     } else {
         u->banco.saldo += valor;
         char desc[80]; snprintf(desc, sizeof(desc), "Depósito PIX R$ %.2f", valor);
-        registrarTransacaoBanco(u, "PIX", desc, valor, 0.0f);
+        registrarTransacaoBanco(u, "Depósito", desc, valor, 0.0f);
     }
 
     printf("Depósito realizado. Saldo banco: R$ %.2f\n", u->banco.saldo);
@@ -259,8 +272,8 @@ void transferirParaInvestimento(Usuario *u) {
     u->banco.saldo -= valor;
     u->investimento.saldo += valor;
     char desc[80]; snprintf(desc, sizeof(desc), "Transferência p/ Investimento R$ %.2f", valor);
-    registrarTransacaoBanco(u, "Transferência", desc, -valor, 0.0f); // no banco fica como saída
-    registrarTransacaoInvest(u, "Recebido", desc, valor, 0.0f); // no invest como entrada
+    registrarTransacaoBanco(u, "Transferência", desc, -valor, 0.0f); // banco: saída
+    registrarTransacaoInvest(u, "Recebido", desc, valor, 0.0f); // investimento: entrada
     printf("Transferência concluída. Saldo caixa investimento: R$ %.2f\n", u->investimento.saldo);
 }
 
@@ -356,11 +369,12 @@ void comprarAtivoRV(Usuario *u) {
         u->investimento.carteira[idx].ticker[sizeof(u->investimento.carteira[idx].ticker)-1] = '\0';
         u->investimento.carteira[idx].quantidade = quantidade;
         u->investimento.carteira[idx].precoMedio = a->preco;
+        u->investimento.carteira[idx].mesesAcumuladosLocal = 0;
     }
 
     /* registra transação de compra no extrato de investimento */
     char desc[80]; snprintf(desc, sizeof(desc), "Compra %dx %s @ R$ %.2f", quantidade, a->ticker, a->preco);
-    registrarTransacaoInvest(u, "Compra Ativo", desc, -custoTotal, 0.0f);
+    registrarTransacaoInvest(u, "Compra", desc, -custoTotal, 0.0f);
 
     printf("Compra efetuada: %d cotas de %s | Custo: R$ %.2f\n", quantidade, a->ticker, custoTotal);
     printf("Saldo caixa invest: R$ %.2f\n", u->investimento.saldo);
@@ -395,17 +409,20 @@ void venderAtivoRV(Usuario *u) {
     if (escolha == 0) return;
     if (escolha < 1 || escolha > u->investimento.numAtivos) { printf("Opção inválida.\n"); return; }
 
+    /* pega referência para posição */
     AtivoCarteira *pos = &u->investimento.carteira[escolha - 1];
     int qtdVenda;
     printf("Quantidade para vender (%d disponível): ", pos->quantidade);
     if (scanf("%d", &qtdVenda) != 1 || qtdVenda <= 0) { clear_input(); printf("Quantidade inválida.\n"); return; }
     if (qtdVenda > pos->quantidade) { printf("Quantidade maior que a posição.\n"); return; }
 
-    /* achar preço atual */
+    /* achar preço atual e índice do ativo global para usar o nome completo */
     float precoAtual = 0.0f;
+    int ativoIdx = -1;
     for (int j = 0; j < NUM_ATIVOS; ++j) {
         if (strcmp(pos->ticker, ativosDisponiveis[j].ticker) == 0) {
             precoAtual = ativosDisponiveis[j].preco;
+            ativoIdx = j;
             break;
         }
     }
@@ -414,7 +431,16 @@ void venderAtivoRV(Usuario *u) {
     /* credita na conta de investimento (caixa) */
     u->investimento.saldo += valorVenda;
 
-    /* atualiza posição */
+    /* registra transação de venda - usa ticker/nome correto */
+    char desc[120];
+    if (ativoIdx != -1) {
+        snprintf(desc, sizeof(desc), "Venda %dx %s (%s) @ R$ %.2f", qtdVenda, ativosDisponiveis[ativoIdx].nome, pos->ticker, precoAtual);
+    } else {
+        snprintf(desc, sizeof(desc), "Venda %dx %s @ R$ %.2f", qtdVenda, pos->ticker, precoAtual);
+    }
+    registrarTransacaoInvest(u, "Venda", desc, valorVenda, 0.0f);
+
+    /* atualiza posição (após registrar o extrato) */
     pos->quantidade -= qtdVenda;
     if (pos->quantidade == 0) {
         /* remove entry (shift) */
@@ -423,10 +449,6 @@ void venderAtivoRV(Usuario *u) {
         }
         u->investimento.numAtivos--;
     }
-
-    /* registra transação de venda */
-    char desc[80]; snprintf(desc, sizeof(desc), "Venda %dx %s @ R$ %.2f", qtdVenda, pos->ticker, precoAtual);
-    registrarTransacaoInvest(u, "Venda Ativo", desc, valorVenda, 0.0f);
 
     printf("Venda efetuada! Recebeu R$ %.2f no caixa de investimento.\n", valorVenda);
     printf("Saldo caixa investimento: R$ %.2f\n", u->investimento.saldo);
@@ -482,6 +504,71 @@ void mostrarCarteira(Usuario *u) {
     }
 }
 
+/* ========== simulação de proventos RV (acumula meses) ========== */
+
+void simularProventosRV(Usuario *u) {
+    int meses;
+    printf("\nQuantos meses deseja simular? ");
+    if (scanf("%d", &meses) != 1 || meses <= 0) { clear_input(); printf("Entrada inválida.\n"); return; }
+
+    float totalRendimento = 0.0f;
+    float perAssetTotals[MAX_ATIVOS] = {0.0f};
+
+    printf("\n=== Simulação de Proventos (Renda Variável) por %d meses ===\n", meses);
+
+    /* Para cada ativo na carteira do usuário, acumulamos meses no ativo global correspondente. */
+    for (int iCarteira = 0; iCarteira < u->investimento.numAtivos; ++iCarteira) {
+        AtivoCarteira *c = &u->investimento.carteira[iCarteira];
+        if (c->quantidade <= 0) continue;
+
+        /* encontra ativo na lista global */
+        int idx = -1;
+        for (int j = 0; j < NUM_ATIVOS; ++j) {
+            if (strcmp(c->ticker, ativosDisponiveis[j].ticker) == 0) { idx = j; break; }
+        }
+        if (idx == -1) continue;
+
+        AtivoRV *a = &ativosDisponiveis[idx];
+        if (a->periods_per_year <= 0) continue;
+
+        /* acumula meses solicitados */
+        a->mesesAcumulados += meses;
+
+        int monthsPerPay = 12 / a->periods_per_year;
+        if (monthsPerPay <= 0) monthsPerPay = 12;
+
+        /* enquanto houver mês suficiente para um pagamento, efetua provento */
+        while (a->mesesAcumulados >= monthsPerPay) {
+            float rendimento = a->dividend_per_period * (float)c->quantidade;
+
+            if (rendimento > 0.0f) {
+                /* creditamos NO CAIXA DA CONTA DE INVESTIMENTO */
+                u->investimento.saldo += rendimento;
+                totalRendimento += rendimento;
+                perAssetTotals[iCarteira] += rendimento;
+
+                /* registra no extrato de investimento */
+                char descInv[100];
+                snprintf(descInv, sizeof(descInv), "Provento %s (%d meses) R$ %.2f", a->ticker, monthsPerPay, rendimento);
+                registrarTransacaoInvest(u, "Provento", descInv, rendimento, 0.0f);
+            }
+
+            /* reduz o contador de meses do ativo global */
+            a->mesesAcumulados -= monthsPerPay;
+        }
+    }
+
+    /* exibe resumo por ativo (somente os da carteira) */
+    printf("\n--- Resumo da Simulação ---\n");
+    for (int i = 0; i < u->investimento.numAtivos; ++i) {
+        if (perAssetTotals[i] != 0.0f) {
+            printf("%s -> R$ %.2f\n", u->investimento.carteira[i].ticker, perAssetTotals[i]);
+        }
+    }
+    printf("Total creditado na Conta Investimento (proventos): R$ %.2f\n", totalRendimento);
+    printf("Saldo caixa investimento agora: R$ %.2f\n", u->investimento.saldo);
+}
+
 /* submenu de ativos (compra, venda, carteira) */
 void submenuAtivos(Usuario *u) {
     int op;
@@ -491,6 +578,7 @@ void submenuAtivos(Usuario *u) {
         printf("2 - Comprar ativo\n");
         printf("3 - Vender ativo\n");
         printf("4 - Mostrar carteira\n");
+        printf("5 - Simular Proventos (RV)\n");
         printf("0 - Voltar\n");
         printf("Escolha: ");
         if (scanf("%d", &op) != 1) { clear_input(); printf("Entrada inválida.\n"); op = -1; }
@@ -500,6 +588,7 @@ void submenuAtivos(Usuario *u) {
             case 2: comprarAtivoRV(u); break;
             case 3: venderAtivoRV(u); break;
             case 4: mostrarCarteira(u); break;
+            case 5: simularProventosRV(u); break;
             case 0: break;
             default: printf("Opção inválida.\n"); break;
         }
@@ -589,7 +678,7 @@ int main(void) {
 
     int opc;
     do {
-        printf("\n=== Sistema Corretora (versão 515.1.4) ===\n");
+        printf("\n=== Sistema Corretora ===\n");
         printf("1 - Cadastrar Usuário\n");
         printf("2 - Login\n");
         printf("0 - Sair\n");
